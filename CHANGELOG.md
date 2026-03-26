@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-03-25
+
+### Changed
+- `CTA_API_URL`, `STATIONS_URL`, and `CTA_AUTHORIZATION` are now read from environment variables instead of being hardcoded
+
 ## [1.0.0] - 2026-03-25
 
 ### Added
@@ -18,5 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for all eight CTA rail lines (Red, Blue, Brown, Green, Orange, Purple, Pink, Yellow)
 - Batch error aggregation with retry-triggering `RuntimeError` on partial failures
 
-[Unreleased]: https://github.com/lbkulinski/cta-smoking-report-submitter/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/lbkulinski/cta-smoking-report-submitter/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/lbkulinski/cta-smoking-report-submitter/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/lbkulinski/cta-smoking-report-submitter/releases/tag/v1.0.0
