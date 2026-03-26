@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
 import uuid
@@ -7,8 +8,8 @@ import uuid
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-CTA_API_URL = "https://is-prod.endpoints.prj-ccai-prod.cloud.goog/api/v1/dialogflow/detect-intent"
-STATIONS_URL = "https://data.cityofchicago.org/resource/8pix-ypme.json?$limit=10000&$select=map_id,station_name"
+CTA_API_URL = os.environ["CTA_API_URL"]
+STATIONS_URL = os.environ["STATIONS_URL"]
 
 _stations_cache: dict | None = None
 
@@ -28,7 +29,7 @@ def get_stations() -> dict:
 HEADERS = {
     "accept": "*/*",
     "accept-language": "en-US,en;q=0.5",
-    "authorization": "Basic dXNlcm5hbWUxOnBhc3N3b3JkMg==",
+    "authorization": os.environ["CTA_AUTHORIZATION"],
     "content-type": "application/json; charset=UTF-8",
     "origin": "https://www.transitchicago.com",
     "referer": "https://www.transitchicago.com/",
