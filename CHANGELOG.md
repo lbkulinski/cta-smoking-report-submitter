@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-03-25
+
+### Fixed
+- Station names for same-line collisions (Harlem, Western on the Blue Line) now resolve to their branch-qualified names (e.g. "Harlem (O'Hare Branch)") so the CTA virtual agent accepts them. Previously, sending the bare name caused the chatbot to reject the input and return no direction chips, failing the report.
+- `station_descriptive_name` lookup now falls back to `station_name` if the field is absent from a record, preventing a `KeyError` when the stations API response omits the field (e.g. when `$select` is used in `STATIONS_URL`)
+
 ## [1.1.0] - 2026-03-25
 
 ### Changed
@@ -23,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for all eight CTA rail lines (Red, Blue, Brown, Green, Orange, Purple, Pink, Yellow)
 - Batch error aggregation with retry-triggering `RuntimeError` on partial failures
 
-[Unreleased]: https://github.com/lbkulinski/cta-smoking-report-submitter/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/lbkulinski/cta-smoking-report-submitter/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/lbkulinski/cta-smoking-report-submitter/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/lbkulinski/cta-smoking-report-submitter/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/lbkulinski/cta-smoking-report-submitter/releases/tag/v1.0.0

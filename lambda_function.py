@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 import uuid
@@ -15,13 +16,55 @@ _stations_cache: dict | None = None
 
 
 def get_stations() -> dict:
-    """Return a cached map_id → station_name dict, fetching from Chicago Open Data if needed."""
+    """Return a cached map_id → chatbot station name dict, fetching from Chicago Open Data if needed.
+
+    Values use station_descriptive_name (e.g. "Harlem (O'Hare Branch)") for stations that share a
+    name with another station on the same line, and station_name (e.g. "Addison") otherwise.
+    """
     global _stations_cache
     if _stations_cache is None:
         req = urllib.request.Request(STATIONS_URL)
         with urllib.request.urlopen(req, timeout=10) as resp:
             records = json.loads(resp.read())
-        _stations_cache = {r["map_id"]: r["station_name"] for r in records}
+        line_fields = {"blue", "red", "brn", "g", "o", "p", "pnk", "y"}
+
+        # Aggregate stops into stations (map_id → name/lines), unioning line flags
+        # across all stop records so collision detection is accurate even if a single
+        # record omits a flag.
+        station_info: dict[str, dict] = {}
+        for r in records:
+            mid = r["map_id"]
+            # Strip "Line - " prefix inside parentheses so the chatbot-facing
+            # name matches what the CTA virtual agent shows, e.g.
+            # "Harlem (Blue Line - O'Hare Branch)" → "Harlem (O'Hare Branch)"
+            descriptive = re.sub(r"\(\w+ Line - ", "(", r.get("station_descriptive_name", r["station_name"]))
+            if mid not in station_info:
+                station_info[mid] = {
+                    "name": r["station_name"],
+                    "descriptive": descriptive,
+                    "lines": {f for f in line_fields if r.get(f)},
+                }
+            else:
+                station_info[mid]["lines"] |= {f for f in line_fields if r.get(f)}
+
+        # A station needs a descriptive name only if another station shares its
+        # station_name AND at least one line (i.e. a same-line name collision).
+        by_name: dict[str, list[str]] = {}
+        for mid, info in station_info.items():
+            by_name.setdefault(info["name"], []).append(mid)
+
+        needs_descriptive: set[str] = set()
+        for mids in by_name.values():
+            for i, mid_a in enumerate(mids):
+                for mid_b in mids[i + 1:]:
+                    if station_info[mid_a]["lines"] & station_info[mid_b]["lines"]:
+                        needs_descriptive.add(mid_a)
+                        needs_descriptive.add(mid_b)
+
+        _stations_cache = {
+            mid: (info["descriptive"] if mid in needs_descriptive else info["name"])
+            for mid, info in station_info.items()
+        }
         logger.info("Loaded %d stations from Chicago Open Data", len(_stations_cache))
     return _stations_cache
 
