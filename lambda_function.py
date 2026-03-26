@@ -37,7 +37,7 @@ def get_stations() -> dict:
             # Strip "Line - " prefix inside parentheses so the chatbot-facing
             # name matches what the CTA virtual agent shows, e.g.
             # "Harlem (Blue Line - O'Hare Branch)" → "Harlem (O'Hare Branch)"
-            descriptive = re.sub(r"\(\w+ Line - ", "(", r["station_descriptive_name"])
+            descriptive = re.sub(r"\(\w+ Line - ", "(", r.get("station_descriptive_name", r["station_name"]))
             if mid not in station_info:
                 station_info[mid] = {
                     "name": r["station_name"],
