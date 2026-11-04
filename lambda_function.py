@@ -2,15 +2,61 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 CTA_API_URL = os.environ["CTA_API_URL"]
 STATIONS_URL = os.environ["STATIONS_URL"]
+DEDUPE_TABLE = os.environ.get("DEDUPE_TABLE", "processed-cta-smoking-posts")
+DEDUPE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+_dynamodb = None
+
+
+def _get_dynamodb():
+    global _dynamodb
+    if _dynamodb is None:
+        import boto3  # provided by the Lambda runtime
+
+        _dynamodb = boto3.client("dynamodb")
+    return _dynamodb
+
+
+def _error_code(e: Exception) -> str | None:
+    return getattr(e, "response", {}).get("Error", {}).get("Code")
+
+
+def claim_report(report_key: str) -> bool:
+    """Atomically record a receipt for this report. Returns False if it was already claimed."""
+    try:
+        _get_dynamodb().put_item(
+            TableName=DEDUPE_TABLE,
+            Item={
+                "reportKey": {"S": report_key},
+                "ttl": {"N": str(int(time.time()) + DEDUPE_TTL_SECONDS)},
+            },
+            ConditionExpression="attribute_not_exists(reportKey)",
+        )
+        return True
+    except Exception as e:
+        if _error_code(e) == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def release_report(report_key: str) -> None:
+    """Delete the receipt so a retry can resubmit after a failed attempt (best effort)."""
+    try:
+        _get_dynamodb().delete_item(TableName=DEDUPE_TABLE, Key={"reportKey": {"S": report_key}})
+    except Exception:
+        logger.exception("Failed to release dedupe receipt for report=%s", report_key)
+
 
 _stations_cache: dict | None = None
 
@@ -162,6 +208,23 @@ def resolve_direction(chips: list, destination_station_name: str) -> str:
     )
 
 
+_INSTANT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?Z$")
+
+
+def is_valid_instant(value) -> bool:
+    """Return True if value is an ISO-8601 UTC instant like 2026-02-21T21:00:22.399660Z."""
+    if not isinstance(value, str):
+        return False
+    match = _INSTANT_RE.match(value)
+    if not match:
+        return False
+    try:
+        datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return True
+
+
 def parse_new_image(new_image: dict) -> dict:
     """Deserialize a DynamoDB stream NewImage attribute map into a plain dict."""
 
@@ -170,23 +233,77 @@ def parse_new_image(new_image: dict) -> dict:
 
     def nullable_s(key):
         item = new_image.get(key)
-        return item["S"] if item else None
+        return item.get("S") if item else None
+
+    car_number = s("carNumber")
+    line = s("line")
+    reported_at = s("reportedAt")
+    car_number_line = nullable_s("carNumberLine") or f"{car_number}#{line}"
 
     return {
-        "line": s("line"),
-        "carNumber": s("carNumber"),
+        "line": line,
+        "carNumber": car_number,
         "nextStationId": s("nextStationId"),
         "destinationId": s("destinationId"),
-        "reportedAt": s("reportedAt"),
+        "reportedAt": reported_at,
         "runNumber": nullable_s("runNumber"),
+        # Stable identifier for a report: carNumberLine + reportedAt
+        "reportKey": f"{car_number_line}#{reported_at}",
     }
+
+
+def get_report_to_submit(record: dict) -> dict | None:
+    """Return the parsed report if this stream record is a new report, else None.
+
+    - INSERT: new report.
+    - MODIFY: new report only if NewImage.reportedAt differs from OldImage.reportedAt
+      (a resubmit over an expired, not-yet-TTL-deleted item).
+    - REMOVE (TTL or manual) and anything else: ignored.
+    Records with a missing/malformed reportedAt are skipped (logged, not retried).
+    """
+    event_name = record.get("eventName")
+    if event_name not in ("INSERT", "MODIFY"):
+        return None
+
+    ddb = record.get("dynamodb", {})
+    new_image = ddb.get("NewImage")
+    if not new_image:
+        logger.warning("Skipping %s record with no NewImage | eventID=%s", event_name, record.get("eventID"))
+        return None
+
+    reported_at = (new_image.get("reportedAt") or {}).get("S")
+    if not is_valid_instant(reported_at):
+        logger.warning(
+            "Skipping %s record with missing/malformed reportedAt=%r | carNumberLine=%s eventID=%s",
+            event_name,
+            reported_at,
+            (new_image.get("carNumberLine") or {}).get("S"),
+            record.get("eventID"),
+        )
+        return None
+
+    if event_name == "MODIFY":
+        old_image = ddb.get("OldImage")
+        if not old_image:
+            # Stream view type is not NEW_AND_OLD_IMAGES; can't tell a new report from a no-op.
+            logger.error(
+                "Skipping MODIFY record with no OldImage (check stream view type) | eventID=%s",
+                record.get("eventID"),
+            )
+            return None
+        if (old_image.get("reportedAt") or {}).get("S") == reported_at:
+            logger.info("Skipping MODIFY with unchanged reportedAt=%s", reported_at)
+            return None
+
+    return parse_new_image(new_image)
 
 
 def submit_report(report: dict) -> None:
     user_id = str(uuid.uuid4())
     line_display = LINE_DISPLAY_NAMES[report["line"]]
     logger.info(
-        "Submitting smoking report | line=%s car=%s userId=%s",
+        "Submitting smoking report | report=%s line=%s car=%s userId=%s",
+        report["reportKey"],
         line_display,
         report["carNumber"],
         user_id,
@@ -239,24 +356,27 @@ def lambda_handler(event: dict, context) -> dict:
     errors = []
 
     for record in event.get("Records", []):
-        if record.get("eventName") != "INSERT":
-            continue
-
-        report_id = (
-            record.get("dynamodb", {})
-            .get("NewImage", {})
-            .get("reportId", {})
-            .get("S", "unknown")
-        )
+        report_key = "unknown"
         try:
-            report = parse_new_image(record["dynamodb"]["NewImage"])
-            submit_report(report)
+            report = get_report_to_submit(record)
+            if report is None:
+                continue
+            report_key = report["reportKey"]
+            if not claim_report(report_key):
+                logger.info("Skipping already-processed report=%s", report_key)
+                continue
+            try:
+                submit_report(report)
+            except Exception:
+                # Free the receipt so the retried batch can submit this report again
+                release_report(report_key)
+                raise
         except urllib.error.HTTPError as e:
-            logger.exception("HTTP error submitting reportId=%s: %s", report_id, e)
-            errors.append(f"reportId={report_id}: HTTP {e.code}")
+            logger.exception("HTTP error submitting report=%s: %s", report_key, e)
+            errors.append(f"report={report_key}: HTTP {e.code}")
         except Exception as e:
-            logger.exception("Failed to submit reportId=%s: %s", report_id, e)
-            errors.append(f"reportId={report_id}: {e}")
+            logger.exception("Failed to submit report=%s: %s", report_key, e)
+            errors.append(f"report={report_key}: {e}")
 
     if errors:
         # Raising causes Lambda to retry the batch — appropriate for transient failures

@@ -1,0 +1,19 @@
+# IDE
+.idea/
+.vscode/
+
+# Build artifacts
+lambda.zip
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS
+.DS_Store

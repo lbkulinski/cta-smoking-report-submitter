@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Support the new per-car-and-line reports table schema (`carNumberLine` key; no `date`/`reportId`)
+- `MODIFY` stream events with a changed `reportedAt` are now treated as new reports; `REMOVE` and unchanged `MODIFY` events are ignored
+- Records with a missing or malformed `reportedAt` are skipped instead of failing the batch
+- Log/error identifiers use `carNumberLine#reportedAt` instead of `reportId`
+
+### Added
+- Idempotency: a receipt (`reportKey` = `carNumberLine#reportedAt`, 7-day `ttl`) is conditionally written to the `DEDUPE_TABLE` (default `processed-cta-smoking-posts`) before submitting; already-claimed reports are skipped, and the receipt is deleted if the submit fails so retries still work
+- Unit tests (`python3 -m unittest discover -s tests`)
+
 ## [1.2.0] - 2026-03-25
 
 ### Fixed
