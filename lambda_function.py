@@ -13,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 CTA_API_URL = os.environ["CTA_API_URL"]
 STATIONS_URL = os.environ["STATIONS_URL"]
-DEDUPE_TABLE = os.environ.get("DEDUPE_TABLE", "processed-cta-smoking-posts")
+DEDUPE_TABLE = os.environ["DEDUPE_TABLE"]
 DEDUPE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 _dynamodb = None

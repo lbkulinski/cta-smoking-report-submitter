@@ -5,6 +5,7 @@ from unittest import mock
 os.environ.setdefault("CTA_API_URL", "https://cta.example/api")
 os.environ.setdefault("STATIONS_URL", "https://stations.example/api")
 os.environ.setdefault("CTA_AUTHORIZATION", "test-token")
+os.environ.setdefault("DEDUPE_TABLE", "test-dedupe-table")
 
 import lambda_function as lf  # noqa: E402
 
