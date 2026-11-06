@@ -15,6 +15,17 @@ The function is triggered by DynamoDB stream events (`NEW_AND_OLD_IMAGES`). A re
    - Direction of travel
    - Time of incident: "Just now"
 
+## Environment Variables
+
+All are required; there are no defaults.
+
+| Variable | Description |
+|---|---|
+| `CTA_API_URL` | CTA Dialogflow chatbot endpoint |
+| `STATIONS_URL` | Chicago Open Data Portal stations endpoint |
+| `CTA_AUTHORIZATION` | Value of the `authorization` header sent to the CTA endpoint (treat as a secret) |
+| `PROCESSED_REPORTS_TABLE_NAME` | This function's own receipts table (see Deduplication) |
+
 ## Input Schema (DynamoDB NewImage)
 
 | Field | Type | Description |
@@ -49,6 +60,21 @@ zip lambda.zip lambda_function.py
 pip install -r requirements-dev.txt
 pytest
 ```
+
+## CI/CD
+
+- `.github/workflows/ci.yml` runs `ruff` and `pytest` on pull requests to `main` (Python 3.12).
+- `.github/workflows/deploy.yml` runs CI (lint and tests), then updates the Lambda's code. It runs on every push to `main` and can also be run manually. It only updates code; environment variables, tables, IAM and the event source mapping are managed elsewhere.
+- `.github/dependabot.yml` checks the Python dependencies and the workflow actions weekly.
+
+Deploy setup (repository settings):
+
+| Kind | Name | Description |
+|---|---|---|
+| Variable | `AWS_ROLE_ARN` | IAM role GitHub assumes via OIDC. Needs `lambda:UpdateFunctionCode` and `lambda:GetFunctionConfiguration` on the function (the latter is used by the post-deploy `aws lambda wait function-updated` step). Because the deploy job runs in the `production` environment, the role's trust policy must allow the subject `repo:lbkulinski/cta-smoking-report-submitter:environment:production` |
+| Variable | `AWS_REGION` | Region of the Lambda |
+| Variable | `LAMBDA_FUNCTION_NAME` | Name of the Lambda function |
+| Environment | `production` | The deploy job runs in this environment. Optionally add required reviewers as an approval gate |
 
 ## License
 

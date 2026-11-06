@@ -238,7 +238,3 @@ class SubmitReportTests(unittest.TestCase):
     def test_no_run_number_is_not_sent(self):
         sent = self.run_submit("40900")
         self.assertNotIn("123", sent)
-
-
-if __name__ == "__main__":
-    unittest.main()
