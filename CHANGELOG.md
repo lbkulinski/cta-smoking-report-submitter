@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Log/error identifiers use `carNumberLine#reportedAt` instead of `reportId`
 
 ### Added
+- MIT `LICENSE`
 - Idempotency: a receipt (`reportKey` = `carNumberLine#reportedAt`, 7-day `ttl`) is conditionally written to the table named by the required `PROCESSED_REPORTS_TABLE_NAME` env var (e.g. `processed-cta-smoking-submissions`) before submitting; already-claimed reports are skipped, and the receipt is deleted if the submit fails so retries still work
 - Unit tests (`pytest`)
 

@@ -49,3 +49,7 @@ zip lambda.zip lambda_function.py
 pip install -r requirements-dev.txt
 pytest
 ```
+
+## License
+
+[MIT](LICENSE)
