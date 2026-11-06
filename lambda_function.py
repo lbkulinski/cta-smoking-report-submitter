@@ -13,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 CTA_API_URL = os.environ["CTA_API_URL"]
 STATIONS_URL = os.environ["STATIONS_URL"]
-DEDUPE_TABLE = os.environ["DEDUPE_TABLE"]
+PROCESSED_REPORTS_TABLE_NAME = os.environ["PROCESSED_REPORTS_TABLE_NAME"]
 DEDUPE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 _dynamodb = None
@@ -36,7 +36,7 @@ def claim_report(report_key: str) -> bool:
     """Atomically record a receipt for this report. Returns False if it was already claimed."""
     try:
         _get_dynamodb().put_item(
-            TableName=DEDUPE_TABLE,
+            TableName=PROCESSED_REPORTS_TABLE_NAME,
             Item={
                 "reportKey": {"S": report_key},
                 "ttl": {"N": str(int(time.time()) + DEDUPE_TTL_SECONDS)},
@@ -53,7 +53,7 @@ def claim_report(report_key: str) -> bool:
 def release_report(report_key: str) -> None:
     """Delete the receipt so a retry can resubmit after a failed attempt (best effort)."""
     try:
-        _get_dynamodb().delete_item(TableName=DEDUPE_TABLE, Key={"reportKey": {"S": report_key}})
+        _get_dynamodb().delete_item(TableName=PROCESSED_REPORTS_TABLE_NAME, Key={"reportKey": {"S": report_key}})
     except Exception:
         logger.exception("Failed to release dedupe receipt for report=%s", report_key)
 
@@ -353,7 +353,14 @@ def submit_report(report: dict) -> None:
 
 
 def lambda_handler(event: dict, context) -> dict:
-    errors = []
+    """Process a batch, returning failed records as partial batch failures.
+
+    Requires ReportBatchItemFailures on the event source mapping. Lambda retries from the
+    lowest failed sequence number; records after it may be redelivered, which is safe
+    because each report is claimed in the receipts table before it is submitted.
+    """
+    failures = []
+    unidentifiable = []
 
     for record in event.get("Records", []):
         report_key = "unknown"
@@ -368,18 +375,22 @@ def lambda_handler(event: dict, context) -> dict:
             try:
                 submit_report(report)
             except Exception:
-                # Free the receipt so the retried batch can submit this report again
+                # Free the receipt so the retried record can submit this report again
                 release_report(report_key)
                 raise
-        except urllib.error.HTTPError as e:
-            logger.exception("HTTP error submitting report=%s: %s", report_key, e)
-            errors.append(f"report={report_key}: HTTP {e.code}")
         except Exception as e:
-            logger.exception("Failed to submit report=%s: %s", report_key, e)
-            errors.append(f"report={report_key}: {e}")
+            if isinstance(e, urllib.error.HTTPError):
+                logger.exception("HTTP error submitting report=%s: %s", report_key, e)
+            else:
+                logger.exception("Failed to submit report=%s: %s", report_key, e)
+            sequence_number = record.get("dynamodb", {}).get("SequenceNumber")
+            if sequence_number:
+                failures.append({"itemIdentifier": sequence_number})
+            else:
+                unidentifiable.append(f"report={report_key}: {e}")
 
-    if errors:
-        # Raising causes Lambda to retry the batch — appropriate for transient failures
-        raise RuntimeError(f"{len(errors)} report(s) failed: {errors}")
+    if unidentifiable:
+        # Cannot report a record without a sequence number; fail the whole batch instead.
+        raise RuntimeError(f"{len(unidentifiable)} record(s) failed: {unidentifiable}")
 
-    return {"statusCode": 200}
+    return {"batchItemFailures": failures}

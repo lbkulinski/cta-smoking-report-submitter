@@ -1,19 +1,8 @@
-# IDE
-.idea/
-.vscode/
-
-# Build artifacts
-lambda.zip
-*.zip
-
-# Python
 __pycache__/
-*.py[cod]
+.pytest_cache/
+.ruff_cache/
 .venv/
-venv/
-
-# Claude Code local settings
-.claude/settings.local.json
-
-# OS
+*.zip
+.idea/
 .DS_Store
+.claude/settings.local.json

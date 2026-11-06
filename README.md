@@ -29,7 +29,7 @@ The function is triggered by DynamoDB stream events (`NEW_AND_OLD_IMAGES`). A re
 
 ## Deduplication
 
-Before submitting, the Lambda does a conditional `PutItem` (`attribute_not_exists(reportKey)`) into its own table (required env `DEDUPE_TABLE`, e.g. `processed-cta-smoking-submissions`): partition key `reportKey` (S) = `<carNumberLine>#<reportedAt>`, TTL attribute `ttl` (N, now + 7 days). If the receipt exists the report is skipped. If submission fails, the receipt is deleted so the retry can resubmit. The role needs `dynamodb:PutItem` and `dynamodb:DeleteItem` on that table.
+Before submitting, the Lambda does a conditional `PutItem` (`attribute_not_exists(reportKey)`) into its own table (required env `PROCESSED_REPORTS_TABLE_NAME`, e.g. `processed-cta-smoking-submissions`): partition key `reportKey` (S) = `<carNumberLine>#<reportedAt>`, TTL attribute `ttl` (N, now + 7 days). If the receipt exists the report is skipped. If submission fails, the receipt is deleted so the retry can resubmit. Failed records are returned as `batchItemFailures`, so the event source mapping must set `FunctionResponseTypes: [ReportBatchItemFailures]`. The role needs `dynamodb:PutItem` and `dynamodb:DeleteItem` on that table.
 
 ## Requirements
 
@@ -46,5 +46,6 @@ zip lambda.zip lambda_function.py
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests
+pip install -r requirements-dev.txt
+pytest
 ```

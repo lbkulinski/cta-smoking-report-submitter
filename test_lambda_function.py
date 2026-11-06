@@ -1,3 +1,4 @@
+import itertools
 import os
 import unittest
 from unittest import mock
@@ -5,7 +6,7 @@ from unittest import mock
 os.environ.setdefault("CTA_API_URL", "https://cta.example/api")
 os.environ.setdefault("STATIONS_URL", "https://stations.example/api")
 os.environ.setdefault("CTA_AUTHORIZATION", "test-token")
-os.environ.setdefault("DEDUPE_TABLE", "test-dedupe-table")
+os.environ.setdefault("PROCESSED_REPORTS_TABLE_NAME", "test-dedupe-table")
 
 import lambda_function as lf  # noqa: E402
 
@@ -32,8 +33,11 @@ def image(reported_at=T1, run_number="123", destination="40900", **overrides):
     return img
 
 
-def record(event_name, new=None, old=None, **extra):
-    ddb = {}
+_seq = itertools.count(1)
+
+
+def record(event_name, new=None, old=None, sequence_number=None, **extra):
+    ddb = {"SequenceNumber": sequence_number or str(next(_seq))}
     if new is not None:
         ddb["NewImage"] = new
     if old is not None:
@@ -122,7 +126,7 @@ class HandlerTests(unittest.TestCase):
         ]
         good = record("INSERT", new=image(T2))
         result = self.run_handler(*bad, good)
-        self.assertEqual(result, {"statusCode": 200})
+        self.assertEqual(result, {"batchItemFailures": []})
         self.submit.assert_called_once()
         self.assertEqual(self.submit.call_args.args[0]["reportedAt"], T2)
 
@@ -130,11 +134,21 @@ class HandlerTests(unittest.TestCase):
         for v in ["2026-02-21T21:00:22Z", "2026-02-21T21:00:22.399Z", "2026-02-21T21:00:22.399660123Z"]:
             self.assertTrue(lf.is_valid_instant(v), v)
 
-    def test_submit_failure_still_raises_for_retry(self):
+    def test_submit_failure_is_reported_as_batch_item_failure(self):
         self.submit.side_effect = [RuntimeError("boom"), None]
-        with self.assertRaises(RuntimeError):
-            self.run_handler(record("INSERT", new=image(T1)), record("INSERT", new=image(T2)))
+        result = self.run_handler(
+            record("INSERT", new=image(T1), sequence_number="100"),
+            record("INSERT", new=image(T2), sequence_number="101"),
+        )
+        self.assertEqual(result, {"batchItemFailures": [{"itemIdentifier": "100"}]})
         self.assertEqual(self.submit.call_count, 2)
+
+    def test_failure_without_sequence_number_fails_whole_batch(self):
+        self.submit.side_effect = RuntimeError("boom")
+        rec = record("INSERT", new=image())
+        del rec["dynamodb"]["SequenceNumber"]
+        with self.assertRaises(RuntimeError):
+            self.run_handler(rec)
 
 
 class DedupeTests(HandlerTests):
@@ -146,14 +160,14 @@ class DedupeTests(HandlerTests):
     def test_already_claimed_report_is_not_submitted(self):
         self.claim.return_value = False
         result = self.run_handler(record("INSERT", new=image()))
-        self.assertEqual(result, {"statusCode": 200})
+        self.assertEqual(result, {"batchItemFailures": []})
         self.submit.assert_not_called()
         self.release.assert_not_called()
 
-    def test_failed_submit_releases_receipt_and_raises(self):
+    def test_failed_submit_releases_receipt_and_reports_failure(self):
         self.submit.side_effect = RuntimeError("boom")
-        with self.assertRaises(RuntimeError):
-            self.run_handler(record("INSERT", new=image()))
+        result = self.run_handler(record("INSERT", new=image(), sequence_number="7"))
+        self.assertEqual(result, {"batchItemFailures": [{"itemIdentifier": "7"}]})
         self.release.assert_called_once_with(f"2435#RED#{T1}")
 
     def test_ignored_records_do_not_claim(self):
@@ -164,10 +178,10 @@ class DedupeTests(HandlerTests):
         )
         self.claim.assert_not_called()
 
-    def test_claim_error_other_than_conflict_fails_batch_without_submitting(self):
+    def test_claim_error_other_than_conflict_reports_failure_without_submitting(self):
         self.claim.side_effect = RuntimeError("throttled")
-        with self.assertRaises(RuntimeError):
-            self.run_handler(record("INSERT", new=image()))
+        result = self.run_handler(record("INSERT", new=image(), sequence_number="9"))
+        self.assertEqual(result, {"batchItemFailures": [{"itemIdentifier": "9"}]})
         self.submit.assert_not_called()
 
 
