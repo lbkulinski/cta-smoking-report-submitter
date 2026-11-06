@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Idempotency: a receipt (`reportKey` = `carNumberLine#reportedAt`, 7-day `ttl`) is conditionally written to the table named by the required `PROCESSED_REPORTS_TABLE_NAME` env var (e.g. `processed-cta-smoking-submissions`) before submitting; already-claimed reports are skipped, and the receipt is deleted if the submit fails so retries still work
-- Unit tests (`python3 -m unittest discover -s tests`)
+- Unit tests (`pytest`)
 
 ## [1.2.0] - 2026-03-25
 
