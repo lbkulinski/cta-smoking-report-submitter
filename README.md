@@ -42,6 +42,10 @@ All are required; there are no defaults.
 
 Before submitting, the Lambda does a conditional `PutItem` (`attribute_not_exists(reportKey)`) into its own table (required env `PROCESSED_REPORTS_TABLE_NAME`, e.g. `processed-cta-smoking-submissions`): partition key `reportKey` (S) = `<carNumberLine>#<reportedAt>`, TTL attribute `ttl` (N, now + 7 days). If the receipt exists the report is skipped. If submission fails, the receipt is deleted so the retry can resubmit. Failed records are returned as `batchItemFailures`, so the event source mapping must set `FunctionResponseTypes: [ReportBatchItemFailures]`. The role needs `dynamodb:PutItem` and `dynamodb:DeleteItem` on that table.
 
+### Delivery guarantees
+
+Stream delivery is at least once, so the function claims a receipt before acting. This favors skipping over duplicating: a report is never acted on twice, but it can be skipped if the function is killed between the claim and the action, or if releasing the receipt after a failed action also fails. Receipts expire after 7 days. This is an accepted trade-off.
+
 ## Requirements
 
 No third-party dependencies beyond `boto3`, which the Lambda runtime provides.
