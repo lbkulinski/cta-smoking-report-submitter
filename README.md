@@ -2,6 +2,8 @@
 
 An AWS Lambda function that automatically submits smoking-on-a-train reports to the Chicago Transit Authority (CTA) via their chatbot API.
 
+This is an unofficial project: it is not affiliated with or endorsed by the CTA, and it calls the same chatbot endpoint the CTA website uses.
+
 ## How It Works
 
 The function is triggered by DynamoDB stream events (`NEW_AND_OLD_IMAGES`). A record is a new report if it is an `INSERT`, or a `MODIFY` whose `NewImage.reportedAt` differs from `OldImage.reportedAt`. `REMOVE` events (TTL or manual) and unchanged `MODIFY`s are ignored, as are records with a missing or malformed `reportedAt`. For each new report, it:
@@ -48,7 +50,7 @@ Stream delivery is at least once, so the function claims a receipt before acting
 
 ## Requirements
 
-No third-party dependencies beyond `boto3`, which the Lambda runtime provides.
+Python 3.10 or newer (the code uses `X | None` annotations). No third-party dependencies beyond `boto3`, which the Lambda runtime provides.
 
 ## Deployment
 
@@ -57,6 +59,10 @@ Package and deploy as an AWS Lambda function with a DynamoDB stream event source
 ```bash
 zip lambda.zip lambda_function.py
 ```
+
+### Event source mapping
+
+Set `FunctionResponseTypes: [ReportBatchItemFailures]`, make sure the filter lets `INSERT` and `MODIFY` through, and use a bounded `MaximumRetryAttempts` plus an on-failure destination so a record that keeps failing cannot block the shard until stream retention expires. Records that can never succeed (missing attributes, an unknown line or station, no matching direction) are logged and skipped rather than retried; transient failures are returned in `batchItemFailures` and retried.
 
 ## Tests
 

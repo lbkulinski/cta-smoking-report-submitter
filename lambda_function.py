@@ -19,6 +19,13 @@ DEDUPE_TTL_SECONDS = 7 * 24 * 60 * 60
 _dynamodb = None
 
 
+class PermanentError(ValueError):
+    """A report that can never be submitted (unknown line or station, no matching direction).
+
+    Retrying cannot help, so the handler logs it and moves on instead of failing the record.
+    """
+
+
 def _get_dynamodb():
     global _dynamodb
     if _dynamodb is None:
@@ -202,7 +209,7 @@ def resolve_direction(chips: list, destination_station_name: str) -> str:
         terminal = chip_norm.removesuffix("-bound")
         if dest in chip_norm or terminal in dest:
             return chip
-    raise ValueError(
+    raise PermanentError(
         f"No direction chip matches destination '{destination_station_name}'. "
         f"Available: {chips}"
     )
@@ -295,12 +302,20 @@ def get_report_to_submit(record: dict) -> dict | None:
             logger.info("Skipping MODIFY with unchanged reportedAt=%s", reported_at)
             return None
 
-    return parse_new_image(new_image)
+    try:
+        return parse_new_image(new_image)
+    except KeyError as e:
+        logger.error(
+            "Skipping %s record missing required attribute %s | eventID=%s", event_name, e, record.get("eventID")
+        )
+        return None
 
 
 def submit_report(report: dict) -> None:
     user_id = str(uuid.uuid4())
-    line_display = LINE_DISPLAY_NAMES[report["line"]]
+    line_display = LINE_DISPLAY_NAMES.get(report["line"])
+    if line_display is None:
+        raise PermanentError(f"Unknown line '{report['line']}'")
     logger.info(
         "Submitting smoking report | report=%s line=%s car=%s userId=%s",
         report["reportKey"],
@@ -320,13 +335,13 @@ def submit_report(report: dict) -> None:
 
     next_station_name = stations.get(report["nextStationId"])
     if not next_station_name:
-        raise ValueError(
+        raise PermanentError(
             f"nextStationId '{report['nextStationId']}' not found in stations"
         )
 
     destination_name = "Loop" if report["destinationId"] == "0" else stations.get(report["destinationId"])
     if not destination_name:
-        raise ValueError(
+        raise PermanentError(
             f"destinationId '{report['destinationId']}' not found in stations"
         )
 
@@ -378,6 +393,8 @@ def lambda_handler(event: dict, context) -> dict:
                 # Free the receipt so the retried record can submit this report again
                 release_report(report_key)
                 raise
+        except PermanentError as e:
+            logger.error("Skipping report=%s that cannot be submitted: %s", report_key, e)
         except Exception as e:
             if isinstance(e, urllib.error.HTTPError):
                 logger.exception("HTTP error submitting report=%s: %s", report_key, e)

@@ -134,6 +134,20 @@ class HandlerTests(unittest.TestCase):
         for v in ["2026-02-21T21:00:22Z", "2026-02-21T21:00:22.399Z", "2026-02-21T21:00:22.399660123Z"]:
             self.assertTrue(lf.is_valid_instant(v), v)
 
+    def test_permanent_error_is_skipped_not_retried(self):
+        self.submit.side_effect = lf.PermanentError("station not found")
+        result = self.run_handler(record("INSERT", new=image(), sequence_number="5"))
+        self.assertEqual(result, {"batchItemFailures": []})
+        self.release.assert_called_once()
+
+    def test_record_missing_required_attribute_is_skipped_not_retried(self):
+        img = image()
+        del img["nextStationId"]
+        result = self.run_handler(record("INSERT", new=img, sequence_number="6"))
+        self.assertEqual(result, {"batchItemFailures": []})
+        self.claim.assert_not_called()
+        self.submit.assert_not_called()
+
     def test_submit_failure_is_reported_as_batch_item_failure(self):
         self.submit.side_effect = [RuntimeError("boom"), None]
         result = self.run_handler(
@@ -238,3 +252,12 @@ class SubmitReportTests(unittest.TestCase):
     def test_no_run_number_is_not_sent(self):
         sent = self.run_submit("40900")
         self.assertNotIn("123", sent)
+
+    def test_unknown_line_is_a_permanent_error(self):
+        report = lf.parse_new_image(image(line={"S": "SILVER"}))
+        with self.assertRaises(lf.PermanentError):
+            lf.submit_report(report)
+
+    def test_unknown_destination_is_a_permanent_error(self):
+        with self.assertRaises(lf.PermanentError):
+            self.run_submit("99999")
