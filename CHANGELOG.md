@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Breaking:** station names now come from the DynamoDB stations table (`STATIONS_TABLE_NAME`, needs `dynamodb:Query`) instead of the Chicago Open Data API, so `STATIONS_URL` is no longer used. Stations are resolved before the chat session starts, and a failed lookup is retried rather than dropped
 - Reports that can never be submitted (missing required attributes, unknown line or station, no matching direction) are logged and skipped instead of being retried until stream retention expires
 - **Breaking:** the handler returns `batchItemFailures` instead of raising when a report fails, so only the failed record (and those after it) are retried. The event source mapping must set `FunctionResponseTypes: [ReportBatchItemFailures]` or failures are silently dropped. The response no longer includes `statusCode`
 - **Breaking:** renamed environment variable `DEDUPE_TABLE` to `PROCESSED_REPORTS_TABLE_NAME` (same name as the aggregates and social-bot consumers; each still points at its own table)

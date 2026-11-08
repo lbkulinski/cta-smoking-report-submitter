@@ -8,7 +8,7 @@ This is an unofficial project: it is not affiliated with or endorsed by the CTA,
 
 The function is triggered by DynamoDB stream events (`NEW_AND_OLD_IMAGES`). A record is a new report if it is an `INSERT`, or a `MODIFY` whose `NewImage.reportedAt` differs from `OldImage.reportedAt`. `REMOVE` events (TTL or manual) and unchanged `MODIFY`s are ignored, as are records with a missing or malformed `reportedAt`. For each new report, it:
 
-1. Looks up station names from the [Chicago Open Data Portal](https://data.cityofchicago.org/resource/8pix-ypme.json)
+1. Looks up station names by map ID in the CTA train stations DynamoDB table (the same table the social bot uses)
 2. Walks through the CTA's Dialogflow-based chatbot, providing:
    - Issue type: "Smoking on a train"
    - Train line (e.g. Red Line, Blue Line)
@@ -24,7 +24,7 @@ All are required; there are no defaults.
 | Variable | Description |
 |---|---|
 | `CTA_API_URL` | CTA Dialogflow chatbot endpoint |
-| `STATIONS_URL` | Chicago Open Data Portal stations endpoint |
+| `STATIONS_TABLE_NAME` | DynamoDB stations table (partition key `mapId`, sort key `stopId`, attributes `name` and `descriptiveName`); needs `dynamodb:Query`. Branch-qualified stations such as Harlem on the Blue Line use their descriptive name without the line, e.g. `Harlem (O'Hare Branch)` |
 | `CTA_AUTHORIZATION` | Value of the `authorization` header sent to the CTA endpoint (treat as a secret) |
 | `PROCESSED_REPORTS_TABLE_NAME` | This function's own receipts table (see Deduplication) |
 

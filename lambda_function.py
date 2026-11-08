@@ -12,7 +12,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 CTA_API_URL = os.environ["CTA_API_URL"]
-STATIONS_URL = os.environ["STATIONS_URL"]
+STATIONS_TABLE_NAME = os.environ["STATIONS_TABLE_NAME"]
 PROCESSED_REPORTS_TABLE_NAME = os.environ["PROCESSED_REPORTS_TABLE_NAME"]
 DEDUPE_TTL_SECONDS = 7 * 24 * 60 * 60
 
@@ -65,61 +65,43 @@ def release_report(report_key: str) -> None:
         logger.exception("Failed to release dedupe receipt for report=%s", report_key)
 
 
-_stations_cache: dict | None = None
+_station_cache: dict[str, str] = {}
+
+# Stations that share a name on the same line (e.g. Harlem on the Blue Line's two branches) have a
+# descriptive name like "Harlem (Blue Line - O'Hare Branch)". The chatbot knows them as
+# "Harlem (O'Hare Branch)", so the "<Line> Line - " part is dropped.
+_BRANCH_PREFIX_RE = re.compile(r"\(\w+ Line - ")
 
 
-def get_stations() -> dict:
-    """Return a cached map_id → chatbot station name dict, fetching from Chicago Open Data if needed.
+def get_station_name(map_id: str) -> str | None:
+    """Return the chatbot-facing name for a station, or None if the stations table has no such station.
 
-    Values use station_descriptive_name (e.g. "Harlem (O'Hare Branch)") for stations that share a
-    name with another station on the same line, and station_name (e.g. "Addison") otherwise.
+    Branch-qualified stations use their descriptive name; all others use the plain name. Hits are
+    cached per container. A failed query raises, so the record is retried instead of dropped.
     """
-    global _stations_cache
-    if _stations_cache is None:
-        req = urllib.request.Request(STATIONS_URL)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            records = json.loads(resp.read())
-        line_fields = {"blue", "red", "brn", "g", "o", "p", "pnk", "y"}
-
-        # Aggregate stops into stations (map_id → name/lines), unioning line flags
-        # across all stop records so collision detection is accurate even if a single
-        # record omits a flag.
-        station_info: dict[str, dict] = {}
-        for r in records:
-            mid = r["map_id"]
-            # Strip "Line - " prefix inside parentheses so the chatbot-facing
-            # name matches what the CTA virtual agent shows, e.g.
-            # "Harlem (Blue Line - O'Hare Branch)" → "Harlem (O'Hare Branch)"
-            descriptive = re.sub(r"\(\w+ Line - ", "(", r.get("station_descriptive_name", r["station_name"]))
-            if mid not in station_info:
-                station_info[mid] = {
-                    "name": r["station_name"],
-                    "descriptive": descriptive,
-                    "lines": {f for f in line_fields if r.get(f)},
-                }
-            else:
-                station_info[mid]["lines"] |= {f for f in line_fields if r.get(f)}
-
-        # A station needs a descriptive name only if another station shares its
-        # station_name AND at least one line (i.e. a same-line name collision).
-        by_name: dict[str, list[str]] = {}
-        for mid, info in station_info.items():
-            by_name.setdefault(info["name"], []).append(mid)
-
-        needs_descriptive: set[str] = set()
-        for mids in by_name.values():
-            for i, mid_a in enumerate(mids):
-                for mid_b in mids[i + 1:]:
-                    if station_info[mid_a]["lines"] & station_info[mid_b]["lines"]:
-                        needs_descriptive.add(mid_a)
-                        needs_descriptive.add(mid_b)
-
-        _stations_cache = {
-            mid: (info["descriptive"] if mid in needs_descriptive else info["name"])
-            for mid, info in station_info.items()
-        }
-        logger.info("Loaded %d stations from Chicago Open Data", len(_stations_cache))
-    return _stations_cache
+    map_id = str(map_id)
+    if map_id in _station_cache:
+        return _station_cache[map_id]
+    # Every stop under a mapId carries the same station name, so one item is enough.
+    page = _get_dynamodb().query(
+        TableName=STATIONS_TABLE_NAME,
+        KeyConditionExpression="mapId = :m",
+        ExpressionAttributeValues={":m": {"S": map_id}},
+        ProjectionExpression="#n, descriptiveName",
+        ExpressionAttributeNames={"#n": "name"},
+        Limit=1,
+    )
+    items = page.get("Items", [])
+    if not items:
+        return None
+    item = items[0]
+    name = item.get("name", {}).get("S")
+    descriptive = item.get("descriptiveName", {}).get("S") or ""
+    if _BRANCH_PREFIX_RE.search(descriptive):
+        name = _BRANCH_PREFIX_RE.sub("(", descriptive)
+    if name:
+        _station_cache[map_id] = name
+    return name
 
 
 HEADERS = {
@@ -324,28 +306,27 @@ def submit_report(report: dict) -> None:
         user_id,
     )
 
-    # Steps 1–2: initiate session and select issue type
-    send_message(user_id, "hi")
-    send_message(user_id, "Smoking on a train")
-
-    # Step 3: train line
-    send_message(user_id, line_display)
-
-    stations = get_stations()
-
-    next_station_name = stations.get(report["nextStationId"])
+    # Resolve stations first so a permanent lookup failure never leaves a half-started chat session
+    next_station_name = get_station_name(report["nextStationId"])
     if not next_station_name:
         raise PermanentError(
             f"nextStationId '{report['nextStationId']}' not found in stations"
         )
 
-    destination_name = "Loop" if report["destinationId"] == "0" else stations.get(report["destinationId"])
+    destination_name = "Loop" if report["destinationId"] == "0" else get_station_name(report["destinationId"])
     if not destination_name:
         raise PermanentError(
             f"destinationId '{report['destinationId']}' not found in stations"
         )
 
     logger.info("Resolved stations | nextStation=%s destination=%s", next_station_name, destination_name)
+
+    # Steps 1–2: initiate session and select issue type
+    send_message(user_id, "hi")
+    send_message(user_id, "Smoking on a train")
+
+    # Step 3: train line
+    send_message(user_id, line_display)
 
     # Step 4: car number
     send_message(user_id, report["carNumber"])

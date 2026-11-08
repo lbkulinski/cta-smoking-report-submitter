@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 os.environ.setdefault("CTA_API_URL", "https://cta.example/api")
-os.environ.setdefault("STATIONS_URL", "https://stations.example/api")
+os.environ.setdefault("STATIONS_TABLE_NAME", "cta-train-stations")
 os.environ.setdefault("CTA_AUTHORIZATION", "test-token")
 os.environ.setdefault("PROCESSED_REPORTS_TABLE_NAME", "test-dedupe-table")
 
@@ -236,7 +236,7 @@ class SubmitReportTests(unittest.TestCase):
 
         report = lf.parse_new_image(image(destination=destination))
         with mock.patch.object(lf, "send_message", side_effect=fake_send), \
-             mock.patch.object(lf, "get_stations", return_value=STATIONS), \
+             mock.patch.object(lf, "get_station_name", side_effect=STATIONS.get), \
              mock.patch.object(lf, "extract_direction_chips", return_value=chips + ["Loop-bound"]):
             lf.submit_report(report)
         return sent
@@ -261,3 +261,54 @@ class SubmitReportTests(unittest.TestCase):
     def test_unknown_destination_is_a_permanent_error(self):
         with self.assertRaises(lf.PermanentError):
             self.run_submit("99999")
+
+
+class GetStationNameTests(unittest.TestCase):
+    def setUp(self):
+        lf._station_cache.clear()
+        self.addCleanup(lf._station_cache.clear)
+
+    def lookup(self, items, map_id="40750"):
+        client = mock.Mock()
+        client.query.return_value = {"Items": items}
+        with mock.patch.object(lf, "_get_dynamodb", return_value=client):
+            return lf.get_station_name(map_id), client
+
+    def test_plain_station_uses_name(self):
+        name, _ = self.lookup([{"name": {"S": "Addison"}, "descriptiveName": {"S": "Addison (Red Line)"}}])
+        self.assertEqual(name, "Addison")
+
+    def test_branch_qualified_station_uses_descriptive_name_without_line(self):
+        item = {"name": {"S": "Harlem"}, "descriptiveName": {"S": "Harlem (Blue Line - O'Hare Branch)"}}
+        name, _ = self.lookup([item])
+        self.assertEqual(name, "Harlem (O'Hare Branch)")
+
+    def test_missing_descriptive_name_falls_back_to_name(self):
+        name, _ = self.lookup([{"name": {"S": "Howard"}}])
+        self.assertEqual(name, "Howard")
+
+    def test_queries_by_map_id_without_scanning(self):
+        _, client = self.lookup([{"name": {"S": "Howard"}}], map_id="40900")
+        call = client.query.call_args.kwargs
+        self.assertEqual(call["TableName"], "cta-train-stations")
+        self.assertEqual(call["KeyConditionExpression"], "mapId = :m")
+        self.assertEqual(call["ExpressionAttributeValues"], {":m": {"S": "40900"}})
+        self.assertEqual(call["Limit"], 1)
+
+    def test_unknown_station_returns_none(self):
+        name, _ = self.lookup([])
+        self.assertIsNone(name)
+
+    def test_hits_are_cached(self):
+        client = mock.Mock()
+        client.query.return_value = {"Items": [{"name": {"S": "Howard"}}]}
+        with mock.patch.object(lf, "_get_dynamodb", return_value=client):
+            lf.get_station_name("40900")
+            lf.get_station_name("40900")
+        self.assertEqual(client.query.call_count, 1)
+
+    def test_query_failure_propagates_so_the_record_is_retried(self):
+        client = mock.Mock()
+        client.query.side_effect = RuntimeError("throttled")
+        with mock.patch.object(lf, "_get_dynamodb", return_value=client), self.assertRaises(RuntimeError):
+            lf.get_station_name("40900")
