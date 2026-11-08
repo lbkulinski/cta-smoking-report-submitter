@@ -50,7 +50,7 @@ Stream delivery is at least once, so the function claims a receipt before acting
 
 ## Requirements
 
-Runs on the Python 3.14 Lambda runtime (the code itself needs 3.10 or newer, for `X | None` annotations). No third-party dependencies beyond `boto3`, which the Lambda runtime provides.
+Runs on the Python 3.15 Lambda runtime (the code itself needs 3.10 or newer, for `X | None` annotations). No third-party dependencies beyond `boto3`, which the Lambda runtime provides.
 
 ## Deployment
 
@@ -73,7 +73,7 @@ pytest
 
 ## CI/CD
 
-- `.github/workflows/ci.yml` runs `ruff` and `pytest` on pull requests to `main` (Python 3.14).
+- `.github/workflows/ci.yml` runs `ruff` and `pytest` on pull requests to `main` (Python 3.15).
 - `.github/workflows/deploy.yml` runs CI (lint and tests), then updates the Lambda's code. It runs on every push to `main` and can also be run manually. It only updates code; environment variables, tables, IAM and the event source mapping are managed elsewhere.
 - `.github/dependabot.yml` checks the Python dependencies and the workflow actions weekly.
 
