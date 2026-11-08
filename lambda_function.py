@@ -2,71 +2,106 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 CTA_API_URL = os.environ["CTA_API_URL"]
-STATIONS_URL = os.environ["STATIONS_URL"]
+STATIONS_TABLE_NAME = os.environ["STATIONS_TABLE_NAME"]
+PROCESSED_REPORTS_TABLE_NAME = os.environ["PROCESSED_REPORTS_TABLE_NAME"]
+DEDUPE_TTL_SECONDS = 7 * 24 * 60 * 60
 
-_stations_cache: dict | None = None
+_dynamodb = None
 
 
-def get_stations() -> dict:
-    """Return a cached map_id → chatbot station name dict, fetching from Chicago Open Data if needed.
+class PermanentError(ValueError):
+    """A report that can never be submitted (unknown line or station, no matching direction).
 
-    Values use station_descriptive_name (e.g. "Harlem (O'Hare Branch)") for stations that share a
-    name with another station on the same line, and station_name (e.g. "Addison") otherwise.
+    Retrying cannot help, so the handler logs it and moves on instead of failing the record.
     """
-    global _stations_cache
-    if _stations_cache is None:
-        req = urllib.request.Request(STATIONS_URL)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            records = json.loads(resp.read())
-        line_fields = {"blue", "red", "brn", "g", "o", "p", "pnk", "y"}
 
-        # Aggregate stops into stations (map_id → name/lines), unioning line flags
-        # across all stop records so collision detection is accurate even if a single
-        # record omits a flag.
-        station_info: dict[str, dict] = {}
-        for r in records:
-            mid = r["map_id"]
-            # Strip "Line - " prefix inside parentheses so the chatbot-facing
-            # name matches what the CTA virtual agent shows, e.g.
-            # "Harlem (Blue Line - O'Hare Branch)" → "Harlem (O'Hare Branch)"
-            descriptive = re.sub(r"\(\w+ Line - ", "(", r.get("station_descriptive_name", r["station_name"]))
-            if mid not in station_info:
-                station_info[mid] = {
-                    "name": r["station_name"],
-                    "descriptive": descriptive,
-                    "lines": {f for f in line_fields if r.get(f)},
-                }
-            else:
-                station_info[mid]["lines"] |= {f for f in line_fields if r.get(f)}
 
-        # A station needs a descriptive name only if another station shares its
-        # station_name AND at least one line (i.e. a same-line name collision).
-        by_name: dict[str, list[str]] = {}
-        for mid, info in station_info.items():
-            by_name.setdefault(info["name"], []).append(mid)
+def _get_dynamodb():
+    global _dynamodb
+    if _dynamodb is None:
+        import boto3  # provided by the Lambda runtime
 
-        needs_descriptive: set[str] = set()
-        for mids in by_name.values():
-            for i, mid_a in enumerate(mids):
-                for mid_b in mids[i + 1:]:
-                    if station_info[mid_a]["lines"] & station_info[mid_b]["lines"]:
-                        needs_descriptive.add(mid_a)
-                        needs_descriptive.add(mid_b)
+        _dynamodb = boto3.client("dynamodb")
+    return _dynamodb
 
-        _stations_cache = {
-            mid: (info["descriptive"] if mid in needs_descriptive else info["name"])
-            for mid, info in station_info.items()
-        }
-        logger.info("Loaded %d stations from Chicago Open Data", len(_stations_cache))
-    return _stations_cache
+
+def _error_code(e: Exception) -> str | None:
+    return getattr(e, "response", {}).get("Error", {}).get("Code")
+
+
+def claim_report(report_key: str) -> bool:
+    """Atomically record a receipt for this report. Returns False if it was already claimed."""
+    try:
+        _get_dynamodb().put_item(
+            TableName=PROCESSED_REPORTS_TABLE_NAME,
+            Item={
+                "reportKey": {"S": report_key},
+                "ttl": {"N": str(int(time.time()) + DEDUPE_TTL_SECONDS)},
+            },
+            ConditionExpression="attribute_not_exists(reportKey)",
+        )
+        return True
+    except Exception as e:
+        if _error_code(e) == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def release_report(report_key: str) -> None:
+    """Delete the receipt so a retry can resubmit after a failed attempt (best effort)."""
+    try:
+        _get_dynamodb().delete_item(TableName=PROCESSED_REPORTS_TABLE_NAME, Key={"reportKey": {"S": report_key}})
+    except Exception:
+        logger.exception("Failed to release dedupe receipt for report=%s", report_key)
+
+
+_station_cache: dict[str, str] = {}
+
+# Stations that share a name on the same line (e.g. Harlem on the Blue Line's two branches) have a
+# descriptive name like "Harlem (Blue Line - O'Hare Branch)". The chatbot knows them as
+# "Harlem (O'Hare Branch)", so the "<Line> Line - " part is dropped.
+_BRANCH_PREFIX_RE = re.compile(r"\(\w+ Line - ")
+
+
+def get_station_name(map_id: str) -> str | None:
+    """Return the chatbot-facing name for a station, or None if the stations table has no such station.
+
+    Branch-qualified stations use their descriptive name; all others use the plain name. Hits are
+    cached per container. A failed query raises, so the record is retried instead of dropped.
+    """
+    map_id = str(map_id)
+    if map_id in _station_cache:
+        return _station_cache[map_id]
+    # Every stop under a mapId carries the same station name, so one item is enough.
+    page = _get_dynamodb().query(
+        TableName=STATIONS_TABLE_NAME,
+        KeyConditionExpression="mapId = :m",
+        ExpressionAttributeValues={":m": {"S": map_id}},
+        ProjectionExpression="#n, descriptiveName",
+        ExpressionAttributeNames={"#n": "name"},
+        Limit=1,
+    )
+    items = page.get("Items", [])
+    if not items:
+        return None
+    item = items[0]
+    name = item.get("name", {}).get("S")
+    descriptive = item.get("descriptiveName", {}).get("S") or ""
+    if _BRANCH_PREFIX_RE.search(descriptive):
+        name = _BRANCH_PREFIX_RE.sub("(", descriptive)
+    if name:
+        _station_cache[map_id] = name
+    return name
 
 
 HEADERS = {
@@ -156,10 +191,27 @@ def resolve_direction(chips: list, destination_station_name: str) -> str:
         terminal = chip_norm.removesuffix("-bound")
         if dest in chip_norm or terminal in dest:
             return chip
-    raise ValueError(
+    raise PermanentError(
         f"No direction chip matches destination '{destination_station_name}'. "
         f"Available: {chips}"
     )
+
+
+_INSTANT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?Z$")
+
+
+def is_valid_instant(value) -> bool:
+    """Return True if value is an ISO-8601 UTC instant like 2026-02-21T21:00:22.399660Z."""
+    if not isinstance(value, str):
+        return False
+    match = _INSTANT_RE.match(value)
+    if not match:
+        return False
+    try:
+        datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return True
 
 
 def parse_new_image(new_image: dict) -> dict:
@@ -170,27 +222,104 @@ def parse_new_image(new_image: dict) -> dict:
 
     def nullable_s(key):
         item = new_image.get(key)
-        return item["S"] if item else None
+        return item.get("S") if item else None
+
+    car_number = s("carNumber")
+    line = s("line")
+    reported_at = s("reportedAt")
+    car_number_line = nullable_s("carNumberLine") or f"{car_number}#{line}"
 
     return {
-        "line": s("line"),
-        "carNumber": s("carNumber"),
+        "line": line,
+        "carNumber": car_number,
         "nextStationId": s("nextStationId"),
         "destinationId": s("destinationId"),
-        "reportedAt": s("reportedAt"),
+        "reportedAt": reported_at,
         "runNumber": nullable_s("runNumber"),
+        # Stable identifier for a report: carNumberLine + reportedAt
+        "reportKey": f"{car_number_line}#{reported_at}",
     }
+
+
+def get_report_to_submit(record: dict) -> dict | None:
+    """Return the parsed report if this stream record is a new report, else None.
+
+    - INSERT: new report.
+    - MODIFY: new report only if NewImage.reportedAt differs from OldImage.reportedAt
+      (a resubmit over an expired, not-yet-TTL-deleted item).
+    - REMOVE (TTL or manual) and anything else: ignored.
+    Records with a missing/malformed reportedAt are skipped (logged, not retried).
+    """
+    event_name = record.get("eventName")
+    if event_name not in ("INSERT", "MODIFY"):
+        return None
+
+    ddb = record.get("dynamodb", {})
+    new_image = ddb.get("NewImage")
+    if not new_image:
+        logger.warning("Skipping %s record with no NewImage | eventID=%s", event_name, record.get("eventID"))
+        return None
+
+    reported_at = (new_image.get("reportedAt") or {}).get("S")
+    if not is_valid_instant(reported_at):
+        logger.warning(
+            "Skipping %s record with missing/malformed reportedAt=%r | carNumberLine=%s eventID=%s",
+            event_name,
+            reported_at,
+            (new_image.get("carNumberLine") or {}).get("S"),
+            record.get("eventID"),
+        )
+        return None
+
+    if event_name == "MODIFY":
+        old_image = ddb.get("OldImage")
+        if not old_image:
+            # Stream view type is not NEW_AND_OLD_IMAGES; can't tell a new report from a no-op.
+            logger.error(
+                "Skipping MODIFY record with no OldImage (check stream view type) | eventID=%s",
+                record.get("eventID"),
+            )
+            return None
+        if (old_image.get("reportedAt") or {}).get("S") == reported_at:
+            logger.info("Skipping MODIFY with unchanged reportedAt=%s", reported_at)
+            return None
+
+    try:
+        return parse_new_image(new_image)
+    except KeyError as e:
+        logger.error(
+            "Skipping %s record missing required attribute %s | eventID=%s", event_name, e, record.get("eventID")
+        )
+        return None
 
 
 def submit_report(report: dict) -> None:
     user_id = str(uuid.uuid4())
-    line_display = LINE_DISPLAY_NAMES[report["line"]]
+    line_display = LINE_DISPLAY_NAMES.get(report["line"])
+    if line_display is None:
+        raise PermanentError(f"Unknown line '{report['line']}'")
     logger.info(
-        "Submitting smoking report | line=%s car=%s userId=%s",
+        "Submitting smoking report | report=%s line=%s car=%s userId=%s",
+        report["reportKey"],
         line_display,
         report["carNumber"],
         user_id,
     )
+
+    # Resolve stations first so a permanent lookup failure never leaves a half-started chat session
+    next_station_name = get_station_name(report["nextStationId"])
+    if not next_station_name:
+        raise PermanentError(
+            f"nextStationId '{report['nextStationId']}' not found in stations"
+        )
+
+    destination_name = "Loop" if report["destinationId"] == "0" else get_station_name(report["destinationId"])
+    if not destination_name:
+        raise PermanentError(
+            f"destinationId '{report['destinationId']}' not found in stations"
+        )
+
+    logger.info("Resolved stations | nextStation=%s destination=%s", next_station_name, destination_name)
 
     # Steps 1–2: initiate session and select issue type
     send_message(user_id, "hi")
@@ -198,22 +327,6 @@ def submit_report(report: dict) -> None:
 
     # Step 3: train line
     send_message(user_id, line_display)
-
-    stations = get_stations()
-
-    next_station_name = stations.get(report["nextStationId"])
-    if not next_station_name:
-        raise ValueError(
-            f"nextStationId '{report['nextStationId']}' not found in stations"
-        )
-
-    destination_name = "Loop" if report["destinationId"] == "0" else stations.get(report["destinationId"])
-    if not destination_name:
-        raise ValueError(
-            f"destinationId '{report['destinationId']}' not found in stations"
-        )
-
-    logger.info("Resolved stations | nextStation=%s destination=%s", next_station_name, destination_name)
 
     # Step 4: car number
     send_message(user_id, report["carNumber"])
@@ -236,30 +349,46 @@ def submit_report(report: dict) -> None:
 
 
 def lambda_handler(event: dict, context) -> dict:
-    errors = []
+    """Process a batch, returning failed records as partial batch failures.
+
+    Requires ReportBatchItemFailures on the event source mapping. Lambda retries from the
+    lowest failed sequence number; records after it may be redelivered, which is safe
+    because each report is claimed in the receipts table before it is submitted.
+    """
+    failures = []
+    unidentifiable = []
 
     for record in event.get("Records", []):
-        if record.get("eventName") != "INSERT":
-            continue
-
-        report_id = (
-            record.get("dynamodb", {})
-            .get("NewImage", {})
-            .get("reportId", {})
-            .get("S", "unknown")
-        )
+        report_key = "unknown"
         try:
-            report = parse_new_image(record["dynamodb"]["NewImage"])
-            submit_report(report)
-        except urllib.error.HTTPError as e:
-            logger.exception("HTTP error submitting reportId=%s: %s", report_id, e)
-            errors.append(f"reportId={report_id}: HTTP {e.code}")
+            report = get_report_to_submit(record)
+            if report is None:
+                continue
+            report_key = report["reportKey"]
+            if not claim_report(report_key):
+                logger.info("Skipping already-processed report=%s", report_key)
+                continue
+            try:
+                submit_report(report)
+            except Exception:
+                # Free the receipt so the retried record can submit this report again
+                release_report(report_key)
+                raise
+        except PermanentError as e:
+            logger.error("Skipping report=%s that cannot be submitted: %s", report_key, e)
         except Exception as e:
-            logger.exception("Failed to submit reportId=%s: %s", report_id, e)
-            errors.append(f"reportId={report_id}: {e}")
+            if isinstance(e, urllib.error.HTTPError):
+                logger.exception("HTTP error submitting report=%s: %s", report_key, e)
+            else:
+                logger.exception("Failed to submit report=%s: %s", report_key, e)
+            sequence_number = record.get("dynamodb", {}).get("SequenceNumber")
+            if sequence_number:
+                failures.append({"itemIdentifier": sequence_number})
+            else:
+                unidentifiable.append(f"report={report_key}: {e}")
 
-    if errors:
-        # Raising causes Lambda to retry the batch — appropriate for transient failures
-        raise RuntimeError(f"{len(errors)} report(s) failed: {errors}")
+    if unidentifiable:
+        # Cannot report a record without a sequence number; fail the whole batch instead.
+        raise RuntimeError(f"{len(unidentifiable)} record(s) failed: {unidentifiable}")
 
-    return {"statusCode": 200}
+    return {"batchItemFailures": failures}

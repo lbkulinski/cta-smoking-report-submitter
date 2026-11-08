@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Target the Python 3.15 Lambda runtime; CI tests on Python 3.15
+- **Breaking:** station names now come from the DynamoDB stations table (`STATIONS_TABLE_NAME`, needs `dynamodb:Query`) instead of the Chicago Open Data API, so `STATIONS_URL` is no longer used. Stations are resolved before the chat session starts, and a failed lookup is retried rather than dropped
+- Reports that can never be submitted (missing required attributes, unknown line or station, no matching direction) are logged and skipped instead of being retried until stream retention expires
+- **Breaking:** the handler returns `batchItemFailures` instead of raising when a report fails, so only the failed record (and those after it) are retried. The event source mapping must set `FunctionResponseTypes: [ReportBatchItemFailures]` or failures are silently dropped. The response no longer includes `statusCode`
+- **Breaking:** renamed environment variable `DEDUPE_TABLE` to `PROCESSED_REPORTS_TABLE_NAME` (same name as the aggregates and social-bot consumers; each still points at its own table)
+- CI/CD aligned with `cta-smoking-report-aggregates`: `ci.yml` (ruff + pytest, reusable), deploy gated on CI in a `production` environment, actions pinned to commit SHAs, AWS role/region/function name read from repo **variables** instead of secrets (`production` environment must exist)
+- Tests moved to pytest at the repo root; added `requirements-dev.txt`; Dependabot now covers `pip` and `github-actions`
+- Support the new per-car-and-line reports table schema (`carNumberLine` key; no `date`/`reportId`)
+- `MODIFY` stream events with a changed `reportedAt` are now treated as new reports; `REMOVE` and unchanged `MODIFY` events are ignored
+- Records with a missing or malformed `reportedAt` are skipped instead of failing the batch
+- Log/error identifiers use `carNumberLine#reportedAt` instead of `reportId`
+
+### Added
+- MIT `LICENSE`
+- README documents the environment variables and the deploy setup (repo variables, `production` environment, OIDC trust subject)
+- Idempotency: a receipt (`reportKey` = `carNumberLine#reportedAt`, 7-day `ttl`) is conditionally written to the table named by the required `PROCESSED_REPORTS_TABLE_NAME` env var (e.g. `processed-cta-smoking-submissions`) before submitting; already-claimed reports are skipped, and the receipt is deleted if the submit fails so retries still work
+- Unit tests (`pytest`)
+
 ## [1.2.0] - 2026-03-25
 
 ### Fixed
